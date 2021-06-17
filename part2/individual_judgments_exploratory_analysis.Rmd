@@ -1,0 +1,87 @@
+---
+title: "Exploratory Analysis of Individual Judgments"
+author: "Roger Levy"
+output:
+  github_document: default
+  html_document: default
+---
+
+The approach here has the micro-averaged rank correlation performance metric in mind, and asks how many of the ranks can we expect to be correctly estimated as a function of how many observations per inflected wordform are collected. The methods used here treat the stochastic components of ratings (inter-participant differences and trial-level variability) as normally distributed, which is surely wrong and affects the estimates, but makes things simpler mathematically. Probably it means that the resulting estimates of expected proportion correct are overly optimistic. But hopefully the approach sketched out here is still useful. The below is for English only but could be applied to data from other languages too.
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(lme4)
+```
+
+```{r load data,include=FALSE}
+dat.eng <- read_delim("eng.judgements.individual.dev",delim="\t") %>%
+  mutate(Participant=paste("P",pid))
+apply(xtabs(~lemma+form,dat.eng),1, function(x) sum(x>0))
+#ggplot(dat.eng,aes(x=lemma_rating))+ geom_histogram(binwidth=0.5)
+#ggplot(dat.eng,aes(x=Participant)) + geom_bar() + stat_count()
+#ggplot(dat.eng,aes(x=form)) + geom_bar() + stat_count()
+
+dat.nld <- read_delim("nld.judgements.individual.dev",delim="\t") %>%
+ mutate(Participant=paste("P",pid))
+apply(xtabs(~lemma+form,dat.nld),1, function(x) sum(x>0))
+
+dat.deu <- read_delim("deu.judgements.individual.dev",delim="\t") %>%
+ mutate(Participant=paste("P",pid))
+apply(xtabs(~lemma+form,dat.deu),1, function(x) sum(x>0))
+dat <- dat.eng # dat.eng, dat.nld, or dat.deu
+```
+
+Ratings are on a $0-7$ scale. First let's look at the estimated standard deviation $\sigma$ of an individual-trial rating, including both participant- and trial-level variability:
+
+```{r fit model and estimate standard deviation of ratings}
+system.time(m <- lmer(past_rating ~ 0 + form + (1 | Participant),data=dat,REML=F))
+summary(m)
+#system.time(m1 <- lm(past_rating ~ 0 + form,data=dat.eng))
+rating_sd <- sqrt(sum(as.data.frame(VarCorr(m))[,"vcov"]))
+print(rating_sd)
+```
+
+and now, more crucially, let's look at the distribution of absolute difference scores in mean ratings between the regular and irregular forms of each lemma:
+
+```{r abs_rating_diff_distribution}
+averaged_rating_diffs <- dat %>%
+  group_by(lemma, form) %>%
+  summarize(rating=mean(past_rating,na.rm=TRUE)) %>%
+  group_by(lemma) %>%
+  summarize(ratingDiff=abs(rating[1]-rating[2]))
+
+ggplot(averaged_rating_diffs,aes(x=ratingDiff)) + geom_histogram(binwidth=0.25) + theme_bw()
+```
+
+Suppose that for each nonce lemma the plan is to collect $n$ judgments for each of the two candidate inflected forms. Each participant will contribute one observation at most to judgments for forms of the lemma, so the observations are IID with trial-level standard deviation $\sigma$ for a given form of as estimated above. If we call the regular-form judgments $\{r_j\}$ and the irregular-form judgments $i_j$, we are estimating the true difference score $s$ by the empirical difference of means: $\hat{s}=\frac{\sum_{j=1}^n r_j - \sum_{j=1}^n i_j}{n}$. Under the assumption of IID normally-distributed errors we have $\hat{s} \sim N(s,\frac{2 \sigma}{\sqrt{n}})$. We can look up the probability that the estimated direction of the difference score is the same as the true difference score, $P(\text{sgn } \hat{s} = \text{sgn } s)$, from the normal cumulative distribution function. And we can estimate the expected number of differences scores that will go in the right direction by treating the observed difference scores in the initial data sample as if they were the true difference scores. This gives us the following curve of expected number of lemmas for which the difference score goes in the right direction as a function of $n$:
+
+```{r expected_correct_diff_sign_rate}
+prob_correct_sign <- function(true_abs_diff,n,rating_sd) {
+  return(pnorm(true_abs_diff,mean=0,sd=2*rating_sd/sqrt(n)))
+}
+probs_correct_sign <- function(n) {
+  return(sapply(averaged_rating_diffs$ratingDiff,function(x) prob_correct_sign(x,n,rating_sd)))
+}
+
+Ns <- seq(5,100,by=5)
+ggplot(tibble(n=Ns,y=sapply(Ns,function(n) mean(probs_correct_sign(n)))),aes(x=n,y=y)) + 
+  geom_line() + 
+  theme_bw() + 
+  xlab("Number of samples per form") +
+  ylab("Expected proportion correct sign") +
+  ylim(c(0,1))
+```
+
+So, e.g. if one wants $>90\%$ of judgments to go in the right direction, maybe about 30 judgments per form is sufficient for English (for German it's similar; the Dutch data suggest we'd get to about 87\% with 30 judgments per person), but many more judgments would be necessary to resolve the correct preference of the remaining forms. A more adaptive approach, where more judgments per form are collected for lemmas where the regular and irregular seem to have similar scores, might not be a bad idea.
+
+A larger potential point here, though, is that there is probably a lot of information in the dataset that can be used to evaluate model quality that would be lost under the micro-averaged correlation evaluation approach.
+
+### How predictive are lemma ratings of past-tense ratings?
+
+This is an exploratory bit; "somewhat predictive" seems to be the answer:
+
+```{r predictive_power_of_lemma_ratings}
+system.time(m_with_lemma_ratings <- lmer(past_rating ~ 0 + form + lemma_rating + (1 | Participant),data=dat,REML=F))
+anova(m,m_with_lemma_ratings)
+print(fixef(m_with_lemma_ratings)["lemma_rating"]) 
+```
